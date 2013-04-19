@@ -21,7 +21,7 @@
 #define PRINT_ERROR fprintf(stderr, "Error: %s\n", strerror(errno));
 
 void executeCommand(char **);
-void forkToExecuteComand(char **command);
+void forkToExecuteComand(char **);
 void parseCommand(char *, char **);
 void printPrompt();
 void readCommand(char *);
