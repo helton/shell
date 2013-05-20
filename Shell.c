@@ -5,82 +5,159 @@
  *      Author: helton
  */
 
-#include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-#define MAX_BUFFER_SIZE 255
-#define FALSE 0
-#define TRUE  1
-#define PRINT_ERROR fprintf(stderr, "Error: %s\n", strerror(errno));
-
-void executeCommand(char **);
-void forkToExecuteComand(char **);
-void parseCommand(char *, char **);
-void printPrompt();
-void readCommand(char *);
-void readCommands();
-void setupSignalActionHandlers();
-void signalActionSIGINT_SIGSTPHandler(int);
-
-sig_atomic_t canExecuteNextCommand = TRUE;
+#include "shell.h"
 
 int main(int argc, char **argv) {
-	setupSignalActionHandlers();
-	readCommands();
-	return 0;
+	setupSignalHandlers();
+	readInput();
+	return EXIT_SUCCESS;
 }
 
-void executeCommand(char **command) {
-	if (!canExecuteNextCommand) {
-		canExecuteNextCommand = TRUE;
-		printf("\n");
+char *copyString(char *source) {
+	char *dest = NULL;
+	if (source) {
+		dest = malloc(sizeof(source));
+		strcpy(dest, source);
 	}
-	else {
-		if (!strcmp(command[0], "exit")) {
-			exit(0);
+	return dest;
+}
+
+void executeCommands() {
+	pid_t pid;
+	int i, j, fds[(commandCount-1)*2];
+	for (i = 0; i < (commandCount-1)*2; i+=2) {
+		pipe(fds + i);
+	}
+	for (i = 0; i < commandCount; i++) {
+		if (!strcmp(commands[i]->command, "exit")) {
+			exit(EXIT_SUCCESS);
 		}
-		else if (!strcmp(command[0], "cd")) {
-			if (chdir(command[1] ? command[1] : getenv("HOME"))) {
+		else if (!strcmp(commands[i]->parameters[0], "cd")) {
+			if (chdir((!commands[i]->parameterCount) ? getenv("HOME") : commands[i]->parameters[1])) {
 				PRINT_ERROR
 			}
 		}
 		else {
-			forkToExecuteComand(command);
+			pid = fork();
+			if (pid == -1) {
+				PRINT_ERROR
+			}
+			else if (!pid) {
+				if (commandCount > 0 && i > 0) {
+					dup2(fds[(i - 1) * 2], fileno(stdin));
+				}
+				if (commandCount > 0 && i < commandCount-1) {
+					dup2(fds[((i + 1) * 2)-1], fileno(stdout));
+				}
+				for (j = 0; j < (commandCount-1)*2; j++) {
+					close(fds[j]);
+				}
+				execvp(commands[i]->parameters[0], commands[i]->parameters);
+				PRINT_ERROR
+				exit(EXIT_FAILURE);
+			}
 		}
 	}
+	for (i = 0; i < (commandCount-1)*2; i++) {
+		close(fds[i]);
+	}
+	while (TRUE) {
+	    int status;
+	    pid_t done = wait(&status);
+	    if (done == -1) {
+	        if (errno == ECHILD) {
+	        	break;
+	        }
+	        else {
+	        	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+	        		PRINT_ERROR
+	        	}
+	        }
+	    }
+	}
 }
 
-void forkToExecuteComand(char **command) {
-	if (fork()) {
-		int status;
-		wait(&status);
+void freeCommands() {
+	int i, j;
+	for (i = 0; i < commandCount; i++) {
+		for (j = 0; j < commands[i]->parameterCount; j++) {
+			free(commands[i]->parameters[j]);
+		}
+		free(commands[i]);
 	}
-	else {
-		execvp(command[0], command);
-		PRINT_ERROR
-	}
+	free(commands);
 }
 
-void parseCommand(char *command, char **parsedCommand) {
-    int indexArgs = 0;
+char *getString(char *buffer, int length) {
+	char *p;
+	fgets(buffer, length, stdin);
+	if ((p = strchr(buffer, '\n')) != NULL) {
+		*p = '\0';
+	}
+	return buffer;
+}
+
+int parseCommandParameters(char *command, char **parsedParameters) {
+    int count = 0;
     char *process = command;
     process = strtok(process, " \t");
     while (process) {
-    	parsedCommand[indexArgs++] = process;
+    	parsedParameters[count] = malloc(sizeof(process));
+    	strcpy(parsedParameters[count++], process);
         process = strtok(NULL, " \t");
     }
-    parsedCommand[indexArgs] = NULL;
+    parsedParameters[count] = NULL;
+    return count-1;
+}
+
+int parseCommands(char *line, char **commandList) {
+	int count = 0;
+    char *strCommand = line;
+    strCommand = strtok(strCommand, "|");
+    while (strCommand) {
+    	commandList[count++] = strCommand;
+    	strCommand = strtok(NULL, "|");
+    }
+    commandList[count] = NULL;
+    return count;
+}
+
+void parseLine(char *line) {
+	commandInfo *currentCommand;
+	char *commandList[MAX_COMMAND_COUNT];
+    commandCount = parseCommands(line, commandList);
+    commands = malloc(sizeof(commandInfo)*commandCount);
+    int i;
+    for (i = 0; i < commandCount; i++) {
+    	currentCommand = malloc(sizeof(commandInfo));
+    	currentCommand->command = malloc(sizeof(commandList[i]));
+		strcpy(currentCommand->command, commandList[i]);
+		char *commandCopy = copyString(currentCommand->command);
+		currentCommand->parameterCount = parseCommandParameters(commandCopy, currentCommand->parameters);
+		free(commandCopy);
+		commands[i] = currentCommand;
+    }
+    executeCommands();
+    //printCommands();
+    freeCommands();
+}
+
+void printCommands() {
+	int i, j;
+	for (i = 0; i < commandCount; i++) {
+		printf("\n--------------------------------------");
+		printf("\n# Command = %s", commands[i]->command);
+		printf("\n# ParameterCount = %d", commands[i]->parameterCount);
+		for (j = 0; j <= commands[i]->parameterCount; j++) {
+			printf("\n - Parameter[%d] = %s", j, commands[i]->parameters[j]);
+		}
+		printf("\n--------------------------------------\n");
+	}
 }
 
 void printPrompt() {
     char *cwd, *user, *home, hostname[MAX_BUFFER_SIZE];
+	fflush(stdin);
     if ((cwd = getcwd(NULL, MAX_BUFFER_SIZE)) &&
     	(!gethostname(hostname, sizeof(hostname))) &&
     	(user = getenv("USER")) && (home = getenv("HOME"))) {
@@ -92,21 +169,15 @@ void printPrompt() {
     }
 }
 
-void readCommand(char *command) {
-	char *parsedCommand[MAX_BUFFER_SIZE];
-	parseCommand(command, parsedCommand);
-	executeCommand(parsedCommand);
-}
-
-void readCommands() {
-	char command[MAX_BUFFER_SIZE];
+void readInput() {
+	char line[MAX_BUFFER_SIZE];
 	do {
 		printPrompt();
-		readCommand(gets((char *)&command));
+		parseLine(getString(line, MAX_BUFFER_SIZE));
 	} while(TRUE);
 }
 
-void setupSignalActionHandlers() {
+void setupSignalHandlers() {
 	struct sigaction signalActionSIGINT_SIGSTP;
 	memset (&signalActionSIGINT_SIGSTP, 0, sizeof (signalActionSIGINT_SIGSTP));
 	signalActionSIGINT_SIGSTP.sa_handler = &signalActionSIGINT_SIGSTPHandler;
@@ -115,5 +186,8 @@ void setupSignalActionHandlers() {
 }
 
 void signalActionSIGINT_SIGSTPHandler(int signalNumber) {
-	canExecuteNextCommand = FALSE;
+	pid_t pid;
+	while (!(pid = waitpid(-1, NULL, WNOHANG))) {
+		kill(pid, SIGKILL);
+	}
 }
