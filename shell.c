@@ -13,21 +13,33 @@ int main(int argc, char **argv) {
 	return EXIT_SUCCESS;
 }
 
+void closePipes(int *fds) {
+	if (fds) {
+		int i;
+		for (i = 0; i < (commandCount - 1) * 2; i++) {
+			close(fds[i]);
+		}
+	}
+}
+
 char *copyString(char *source) {
 	char *dest = NULL;
 	if (source) {
-		dest = malloc(sizeof(source));
+		dest = malloc(strlen(source));
 		strcpy(dest, source);
 	}
 	return dest;
 }
 
 void executeCommands() {
-	pid_t pid;
-	int i, j, fds[(commandCount-1)*2];
-	for (i = 0; i < (commandCount-1)*2; i+=2) {
-		pipe(fds + i);
+	if (currentStatus == STOPPED) {
+		currentStatus = RUNNING;
+		return;
 	}
+	pid_t pid, *childProcesses;
+	int i, fds[(commandCount - 1) * 2];
+	openPipes(commandCount ? &fds[0] : NULL);
+	childProcesses = malloc(sizeof(pid_t) * commandCount);
 	for (i = 0; i < commandCount; i++) {
 		if (!strcmp(commands[i]->command, "exit")) {
 			exit(EXIT_SUCCESS);
@@ -42,47 +54,35 @@ void executeCommands() {
 			if (pid == -1) {
 				PRINT_ERROR
 			}
-			else if (!pid) {
-				if (commandCount > 0 && i > 0) {
-					dup2(fds[(i - 1) * 2], fileno(stdin));
+			else if (pid){
+				childProcesses[i] = pid;
+			}
+			else  {
+				if (commands[i]->inputIndex != DEFAULT) {
+					dup2(fds[commands[i]->inputIndex], fileno(stdin));
 				}
-				if (commandCount > 0 && i < commandCount-1) {
-					dup2(fds[((i + 1) * 2)-1], fileno(stdout));
+				if (commands[i]->outputIndex != DEFAULT) {
+					dup2(fds[commands[i]->outputIndex], fileno(stdout));
 				}
-				for (j = 0; j < (commandCount-1)*2; j++) {
-					close(fds[j]);
-				}
+				closePipes(commandCount ? &fds[0] : NULL);
 				execvp(commands[i]->parameters[0], commands[i]->parameters);
 				PRINT_ERROR
 				exit(EXIT_FAILURE);
 			}
 		}
 	}
-	for (i = 0; i < (commandCount-1)*2; i++) {
-		close(fds[i]);
-	}
-	while (TRUE) {
-	    int status;
-	    pid_t done = wait(&status);
-	    if (done == -1) {
-	        if (errno == ECHILD) {
-	        	break;
-	        }
-	        else {
-	        	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-	        		PRINT_ERROR
-	        	}
-	        }
-	    }
-	}
+	closePipes(commandCount ? &fds[0] : NULL);
+	waitChildProcesses(&childProcesses[0]);
+	free(childProcesses);
 }
 
 void freeCommands() {
 	int i, j;
 	for (i = 0; i < commandCount; i++) {
-		for (j = 0; j < commands[i]->parameterCount; j++) {
+		for (j = 0; j < commands[i]->parameterCount+1; j++) {
 			free(commands[i]->parameters[j]);
 		}
+		free(commands[i]->command);
 		free(commands[i]);
 	}
 	free(commands);
@@ -97,13 +97,21 @@ char *getString(char *buffer, int length) {
 	return buffer;
 }
 
+void openPipes(int *fds) {
+	if (fds) {
+		int i;
+		for (i = 0; i < (commandCount - 1) * 2; i += 2) {
+			pipe(fds + i);
+		}
+	}
+}
+
 int parseCommandParameters(char *command, char **parsedParameters) {
     int count = 0;
     char *process = command;
-    process = strtok(process, " \t");
+    process = strtok(process, " \t\"");
     while (process) {
-    	parsedParameters[count] = malloc(sizeof(process));
-    	strcpy(parsedParameters[count++], process);
+   		parsedParameters[count++] = copyString(process);
         process = strtok(NULL, " \t");
     }
     parsedParameters[count] = NULL;
@@ -125,21 +133,28 @@ int parseCommands(char *line, char **commandList) {
 void parseLine(char *line) {
 	commandInfo *currentCommand;
 	char *commandList[MAX_COMMAND_COUNT];
-    commandCount = parseCommands(line, commandList);
-    commands = malloc(sizeof(commandInfo)*commandCount);
-    int i;
-    for (i = 0; i < commandCount; i++) {
-    	currentCommand = malloc(sizeof(commandInfo));
-    	currentCommand->command = malloc(sizeof(commandList[i]));
-		strcpy(currentCommand->command, commandList[i]);
-		char *commandCopy = copyString(currentCommand->command);
-		currentCommand->parameterCount = parseCommandParameters(commandCopy, currentCommand->parameters);
-		free(commandCopy);
-		commands[i] = currentCommand;
-    }
-    executeCommands();
-    //printCommands();
-    freeCommands();
+	if (feof(stdin)) {
+		printf("exit\n");
+		exit(EXIT_SUCCESS);
+	}
+	else {
+		commandCount = parseCommands(line, commandList);
+		commands = malloc(sizeof(commandInfo)*commandCount);
+		int i;
+		for (i = 0; i < commandCount; i++) {
+			currentCommand = malloc(sizeof(commandInfo));
+			currentCommand->command = copyString(commandList[i]);
+			char *commandCopy = copyString(currentCommand->command);
+			currentCommand->parameterCount = parseCommandParameters(commandCopy, currentCommand->parameters);
+			currentCommand->inputIndex  = i == 0 ? DEFAULT : (2 * i - 2);
+			currentCommand->outputIndex = i == commandCount - 1 ? DEFAULT : (2 * i + 1);
+			free(commandCopy);
+			commands[i] = currentCommand;
+		}
+		executeCommands();
+		//printCommands();
+		freeCommands();
+	}
 }
 
 void printCommands() {
@@ -147,6 +162,18 @@ void printCommands() {
 	for (i = 0; i < commandCount; i++) {
 		printf("\n--------------------------------------");
 		printf("\n# Command = %s", commands[i]->command);
+		if (commands[i]->inputIndex != DEFAULT) {
+			printf("\n# In:  fds[%d]", commands[i]->inputIndex);
+		}
+		else {
+			printf("\n# In:  stdin");
+		}
+		if (commands[i]->outputIndex != DEFAULT) {
+			printf("\n# Out: fds[%d]", commands[i]->outputIndex);
+		}
+		else {
+			printf("\n# Out: stdout");
+		}
 		printf("\n# ParameterCount = %d", commands[i]->parameterCount);
 		for (j = 0; j <= commands[i]->parameterCount; j++) {
 			printf("\n - Parameter[%d] = %s", j, commands[i]->parameters[j]);
@@ -156,16 +183,17 @@ void printCommands() {
 }
 
 void printPrompt() {
-    char *cwd, *user, *home, hostname[MAX_BUFFER_SIZE];
-	fflush(stdin);
+    char *cwd, *user, *home, *path, hostname[MAX_BUFFER_SIZE];
     if ((cwd = getcwd(NULL, MAX_BUFFER_SIZE)) &&
     	(!gethostname(hostname, sizeof(hostname))) &&
     	(user = getenv("USER")) && (home = getenv("HOME"))) {
     	if (!strncasecmp(home, cwd, strlen(home))) {
-    		cwd = (char *) cwd + strlen(home) - 1;
-    		cwd[0] = '~';
+    		path = cwd;
+    		path = (char *) path + strlen(home) - 1;
+    		path[0] = '~';
     	}
-    	printf("[MySh] %s@%s:%s$ ", user, hostname, cwd);
+    	printf("[MySh] %s@%s:%s$ ", user, hostname, path);
+    	free(cwd);
     }
 }
 
@@ -186,8 +214,20 @@ void setupSignalHandlers() {
 }
 
 void signalActionSIGINT_SIGSTPHandler(int signalNumber) {
-	pid_t pid;
-	while (!(pid = waitpid(-1, NULL, WNOHANG))) {
-		kill(pid, SIGKILL);
+	currentStatus = STOPPED;
+	printf("\n");
+}
+
+void waitChildProcesses(pid_t *childProcesses) {
+	int i;
+	if (childProcesses) {
+		for (i = 0; i < commandCount; i++) {
+			int status;
+			pid_t waitReturnedValue = waitpid(childProcesses[i], &status, 0);
+			if ((waitReturnedValue == -1) && (!WIFEXITED(status) || WEXITSTATUS(status) != 0)) {
+				fprintf(stderr, "\n-> Interrupted process killed (pid = %d).\n", childProcesses[i]);
+				kill(childProcesses[i], SIGTERM);
+			}
+		}
 	}
 }
