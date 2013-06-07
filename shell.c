@@ -45,8 +45,9 @@ void executeCommands() {
 			exit(EXIT_SUCCESS);
 		}
 		else if (!strcmp(commands[i]->parameters[0], "cd")) {
-			if (chdir((!commands[i]->parameterCount) ? getenv("HOME") : commands[i]->parameters[1])) {
+			if (chdir((!commands[i]->parameterCount) || !strcmp(commands[i]->parameters[1], "~") ? getenv("HOME") : commands[i]->parameters[1])) {
 				PRINT_ERROR
+				return;
 			}
 		}
 		else {
@@ -187,8 +188,8 @@ void printPrompt() {
     if ((cwd = getcwd(NULL, MAX_BUFFER_SIZE)) &&
     	(!gethostname(hostname, sizeof(hostname))) &&
     	(user = getenv("USER")) && (home = getenv("HOME"))) {
+    	path = cwd;
     	if (!strncasecmp(home, cwd, strlen(home))) {
-    		path = cwd;
     		path = (char *) path + strlen(home) - 1;
     		path[0] = '~';
     	}
@@ -224,7 +225,7 @@ void waitChildProcesses(pid_t *childProcesses) {
 		for (i = 0; i < commandCount; i++) {
 			int status;
 			pid_t waitReturnedValue = waitpid(childProcesses[i], &status, 0);
-			if ((waitReturnedValue == -1) && (!WIFEXITED(status) || WEXITSTATUS(status) != 0)) {
+			if ((waitReturnedValue == -1) && (errno != ECHILD) && (!WIFEXITED(status) || WEXITSTATUS(status) != 0)) {
 				fprintf(stderr, "\n-> Interrupted process killed (pid = %d).\n", childProcesses[i]);
 				kill(childProcesses[i], SIGTERM);
 			}
