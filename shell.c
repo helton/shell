@@ -229,5 +229,6 @@ void waitChildProcesses(pid_t *childProcesses) {
 				kill(childProcesses[i], SIGTERM);
 			}
 		}
+		currentStatus = RUNNING;
 	}
 }
